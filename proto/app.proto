@@ -1,0 +1,29 @@
+syntax = "proto3";
+package app;
+
+import "eraftpb.proto";
+
+service AppMessage {
+    rpc sendRaftMessage (eraftpb.Message) returns (RaftMessageResponse);
+}
+message RaftMessageResponse{
+    bool mock = 1;
+}
+/*
+enum AppOp {
+    PUT = 0;
+    GET = 1;
+    DELETE = 2;
+}
+message AppRequest{
+    uint64 id=1;
+    AppOp op=2;
+    string key=3;
+    string value=4;
+}
+message AppReply{
+    uint64 id=1;
+    bool success=2;
+    string value=3;
+}
+*/
