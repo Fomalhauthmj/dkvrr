@@ -3,12 +3,13 @@ use crate::app::{
     app_message_client::AppMessageClient, app_message_server::AppMessageServer, RaftMessageResponse,
 };
 use raft::eraftpb::Message;
-use std::{collections::HashMap,net::SocketAddr};
+use slog::{debug, error, Logger};
+use std::{collections::HashMap, net::SocketAddr};
 use tokio::{
     runtime::Handle,
     sync::{mpsc, oneshot},
 };
-use tonic::transport::Server;
+use tonic::{client, transport::{Endpoint, Server}};
 mod rpc;
 
 pub type NetworkSender = mpsc::Sender<NetworkMessage>;
@@ -25,45 +26,72 @@ pub enum NetworkMessage {
 
 pub struct Network {
     id: u64,
-    raft_listen_addrs: HashMap<u64, SocketAddr>,
+    logger: Logger,
+    serve_addr: SocketAddr,
+    rpc_endpoints: HashMap<u64, Endpoint>,
     pub network_to_server: NetworkSender,
 }
 impl Network {
     pub fn new(
         id: u64,
-        raft_listen_addrs: HashMap<u64, SocketAddr>,
+        logger: Logger,
+        serve_addr: SocketAddr,
+        rpc_endpoints: HashMap<u64, Endpoint>,
         network_to_server: NetworkSender,
     ) -> Self {
         Network {
             id,
-            raft_listen_addrs,
+            logger,
+            serve_addr,
+            rpc_endpoints,
             network_to_server,
         }
     }
     pub fn start(&self, handle: &Handle) {
-        let service = AppMsgService::new(self.network_to_server.clone());
-        let addr = self.raft_listen_addrs.get(&self.id).unwrap();
-        handle.spawn(listen_on(addr.clone(), service));
+        let service = AppMsgService::new(self.network_to_server.clone(), self.logger.clone());
+        handle.spawn(listen_on(self.serve_addr, service));
+        debug!(self.logger, "start finish");
     }
-    pub async fn send_to(&self, id: u64, msg: NetworkMessage){
-        let addr = self.raft_listen_addrs.get(&id).unwrap();
-        let mut client = AppMessageClient::connect(addr.to_string()).await.unwrap();
-        match msg {
-            NetworkMessage::RaftRequest(req) => {
-                let resp = client.send_raft_message(req).await.unwrap();
-                self.network_to_server
-                    .send(NetworkMessage::RaftResponse(resp.into_inner()))
-                    .await.unwrap();
+    pub async fn handle_messages(&self,msgs:Vec<Message>){
+        for msg in msgs{
+            self.send_to(msg.to, NetworkMessage::RaftRequest(msg))
+            .await;
+        }
+    }
+    pub async fn send_to(&self, id: u64, msg: NetworkMessage) {
+        debug!(self.logger, "will send message {:?}",msg);
+        let addr = self.rpc_endpoints.get(&id).unwrap().clone();
+        match AppMessageClient::connect(addr).await {
+            Ok(mut client) => {
+                debug!(self.logger, "connect success");
+                match msg {
+                    NetworkMessage::RaftRequest(req) => match client.send_raft_message(req).await {
+                        Ok(resp) => {
+                            debug!(self.logger, "send success");
+                            self.network_to_server
+                                .send(NetworkMessage::RaftResponse(resp.into_inner()))
+                                .await;
+                        }
+                        Err(e) => {
+                            error!(self.logger, "send error {}", e);
+                        }
+                    },
+                    _ => {
+                        unimplemented!();
+                    }
+                };
             }
-            _ => {
-                unimplemented!();
+            Err(e) => {
+                error!(self.logger, "connect error {}", e);
             }
-        };
+        }
     }
 }
 pub async fn listen_on(addr: SocketAddr, service: AppMsgService) {
     Server::builder()
+        .concurrency_limit_per_connection(32)
         .add_service(AppMessageServer::new(service))
         .serve(addr)
-        .await.unwrap();
+        .await
+        .unwrap();
 }
