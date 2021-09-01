@@ -1,3 +1,4 @@
+mod types;
 pub mod network;
 pub mod app {
     tonic::include_proto!("app");

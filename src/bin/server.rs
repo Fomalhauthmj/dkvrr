@@ -17,11 +17,7 @@ use tokio::time::interval;
 use tokio_stream::wrappers::IntervalStream;
 use tokio_stream::StreamExt;
 use tonic::transport::Endpoint;
-struct ServerConfig {
-    id: u64,
-    serve_addr:SocketAddr,
-    rpc_endpoints: HashMap<u64, Endpoint>,
-}
+
 struct Server {
     id: u64,
     logger: Logger,

@@ -4,26 +4,26 @@ package app;
 import "eraftpb.proto";
 
 service AppMessage {
-    rpc sendRaftMessage (eraftpb.Message) returns (RaftMessageResponse);
+    rpc RaftMessage (eraftpb.Message) returns (RaftMessageMockResponse);
+    rpc RaftConfChangeV2(eraftpb.ConfChangeV2) returns (RaftConfChangeV2MockResponse);
+    rpc App(AppRequest) returns (AppResponse);
 }
-message RaftMessageResponse{
-    bool mock = 1;
-}
-/*
-enum AppOp {
+message RaftMessageMockResponse{}
+message RaftConfChangeV2MockResponse{}
+
+enum AppCmd {
     PUT = 0;
     GET = 1;
     DELETE = 2;
 }
 message AppRequest{
     uint64 id=1;
-    AppOp op=2;
+    AppCmd op=2;
     string key=3;
     string value=4;
 }
-message AppReply{
+message AppResponse{
     uint64 id=1;
     bool success=2;
     string value=3;
 }
-*/
