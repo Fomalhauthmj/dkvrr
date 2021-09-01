@@ -49,49 +49,49 @@ impl Network {
     }
     pub fn start(&self, handle: &Handle) {
         let service = AppMsgService::new(self.network_to_server.clone(), self.logger.clone());
-        handle.spawn(listen_on(self.serve_addr, service));
+        handle.spawn(listen_on(self.logger.clone(),self.serve_addr, service));
         debug!(self.logger, "start finish");
     }
-    pub async fn handle_messages(&self,msgs:Vec<Message>){
+    pub fn handle_messages(&self,msgs:Vec<Message>,handle:&Handle){
         for msg in msgs{
-            self.send_to(msg.to, NetworkMessage::RaftRequest(msg))
-            .await;
-        }
-    }
-    pub async fn send_to(&self, id: u64, msg: NetworkMessage) {
-        debug!(self.logger, "will send message {:?}",msg);
-        let addr = self.rpc_endpoints.get(&id).unwrap().clone();
-        match AppMessageClient::connect(addr).await {
-            Ok(mut client) => {
-                debug!(self.logger, "connect success");
-                match msg {
-                    NetworkMessage::RaftRequest(req) => match client.send_raft_message(req).await {
-                        Ok(resp) => {
-                            debug!(self.logger, "send success");
-                            self.network_to_server
-                                .send(NetworkMessage::RaftResponse(resp.into_inner()))
-                                .await;
-                        }
-                        Err(e) => {
-                            error!(self.logger, "send error {}", e);
-                        }
-                    },
-                    _ => {
-                        unimplemented!();
-                    }
-                };
-            }
-            Err(e) => {
-                error!(self.logger, "connect error {}", e);
-            }
+            let endpoint=self.rpc_endpoints.get(&msg.to).unwrap();
+            handle.spawn(send_to(self.logger.clone(),endpoint.clone(),NetworkMessage::RaftRequest(msg),self.network_to_server.clone()));
         }
     }
 }
-pub async fn listen_on(addr: SocketAddr, service: AppMsgService) {
+pub async fn listen_on(logger:Logger,addr: SocketAddr, service: AppMsgService) {
+    debug!(logger,"listen start");
     Server::builder()
         .concurrency_limit_per_connection(32)
         .add_service(AppMessageServer::new(service))
         .serve(addr)
         .await
         .unwrap();
+        debug!(logger,"listen finish");
+}
+pub async fn send_to(logger:Logger,addr: Endpoint, msg: NetworkMessage,sender:NetworkSender) {
+    match AppMessageClient::connect(addr).await {
+        Ok(mut client) => {
+            debug!(logger, "connect success");
+            match msg {
+                NetworkMessage::RaftRequest(req) => match client.send_raft_message(req).await {
+                    Ok(resp) => {
+                        debug!(logger, "send success");
+                        sender
+                            .send(NetworkMessage::RaftResponse(resp.into_inner()))
+                            .await;
+                    }
+                    Err(e) => {
+                        error!(logger, "send error {}", e);
+                    }
+                },
+                _ => {
+                    unimplemented!();
+                }
+            };
+        }
+        Err(e) => {
+            error!(logger, "connect error {}", e);
+        }
+    }
 }

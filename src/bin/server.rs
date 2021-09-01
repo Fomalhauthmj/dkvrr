@@ -26,7 +26,7 @@ struct Server {
     id: u64,
     logger: Logger,
     runtime: Runtime,
-    network: Option<Network>,
+    network: Network,
     network_receiver: NetworkReceiver,
 }
 impl Server {
@@ -49,7 +49,7 @@ impl Server {
             id: config.id,
             logger,
             runtime,
-            network: Some(Network::new(config.id, network_logger,config.serve_addr, config.rpc_endpoints, tx)),
+            network: Network::new(config.id, network_logger,config.serve_addr, config.rpc_endpoints, tx),
             network_receiver: rx,
         }
     }
@@ -82,16 +82,10 @@ impl Server {
     }
     async fn start(mut self) {
         let raw_node = self.create_raw_node();
-        let sender = self.network.unwrap().network_to_server.clone();
+        let sender = self.network.network_to_server.clone();
         let logger = self.logger.clone();
-        
+        self.network.start(self.runtime.handle());
         let node = raw_node.clone();
-        self.runtime.spawn(async move{
-            let network=self.network.take().unwrap();
-            loop{
-                on_ready(raw_node.clone(), &network,self.logger.clone()).await;
-            }
-        });
         self.runtime.spawn(async move {
             let mut interval = IntervalStream::new(interval(Duration::from_millis(1000)));
             loop {
@@ -135,98 +129,99 @@ impl Server {
                     raw_node.lock().await.tick();
                 }
             };
+            self.on_ready(raw_node.clone()).await;
         }
     }
-}
-async fn on_ready(raw_node: Arc<Mutex<RawNode<MemStorage>>>,network:&Network,logger: Logger) {
-    let mut node = raw_node.lock().await;
-    if !node.has_ready() {
-        return;
-    }
-    let store = node.raft.raft_log.store.clone();
-
-    // Get the `Ready` with `RawNode::ready` interface.
-    let mut ready = node.ready();
-
-    if !ready.messages().is_empty() {
-        // Send out the messages come from the node.
-        network.handle_messages(ready.take_messages()).await;
-    }
-
-    // Apply the snapshot. It's necessary because in `RawNode::advance` we stabilize the snapshot.
-    if *ready.snapshot() != Snapshot::default() {
-        let s = ready.snapshot().clone();
-        if let Err(e) = store.wl().apply_snapshot(s) {
+    async fn on_ready(&self,raw_node: Arc<Mutex<RawNode<MemStorage>>>) {
+        let mut node = raw_node.lock().await;
+        if !node.has_ready() {
+            return;
+        }
+        let store = node.raft.raft_log.store.clone();
+    
+        // Get the `Ready` with `RawNode::ready` interface.
+        let mut ready = node.ready();
+    
+        if !ready.messages().is_empty() {
+            // Send out the messages come from the node.
+            self.network.handle_messages(ready.take_messages(),self.runtime.handle());
+        }
+    
+        // Apply the snapshot. It's necessary because in `RawNode::advance` we stabilize the snapshot.
+        if *ready.snapshot() != Snapshot::default() {
+            let s = ready.snapshot().clone();
+            if let Err(e) = store.wl().apply_snapshot(s) {
+                error!(
+                    self.logger,
+                    "apply snapshot fail: {:?}, need to retry or panic", e
+                );
+                return;
+            }
+        }
+    
+        let handle_committed_entries =
+            |rn: &mut RawNode<MemStorage>, committed_entries: Vec<Entry>| {
+                for entry in committed_entries {
+                    if entry.data.is_empty() {
+                        // From new elected leaders.
+                        continue;
+                    }
+                    if let EntryType::EntryConfChange = entry.get_entry_type() {
+                        // For conf change messages, make them effective.
+                        let mut cc = ConfChange::default();
+                        cc.merge_from_bytes(&entry.data).unwrap();
+                        let cs = rn.apply_conf_change(&cc).unwrap();
+                        store.wl().set_conf_state(cs);
+                    } else {
+                        // For normal proposals, extract the key-value pair and then
+                        // insert them into the kv engine.
+                        debug!(self.logger, "{:?}", entry);
+                    }
+                    if rn.raft.state == StateRole::Leader {
+                        // The leader should response to the clients, tell them if their proposals
+                        // succeeded or not.
+                        //let proposal = proposals.lock().unwrap().pop_front().unwrap();
+                        //proposal.propose_success.send(true).unwrap();
+                    }
+                }
+            };
+        // Apply all committed entries.
+        handle_committed_entries(&mut node, ready.take_committed_entries());
+    
+        // Persistent raft logs. It's necessary because in `RawNode::advance` we stabilize
+        // raft logs to the latest position.
+        if let Err(e) = store.wl().append(ready.entries()) {
             error!(
-                logger,
-                "apply snapshot fail: {:?}, need to retry or panic", e
+                self.logger,
+                "persist raft log fail: {:?}, need to retry or panic", e
             );
             return;
         }
+    
+        if let Some(hs) = ready.hs() {
+            // Raft HardState changed, and we need to persist it.
+            store.wl().set_hardstate(hs.clone());
+        }
+    
+        if !ready.persisted_messages().is_empty() {
+            // Send out the persisted messages come from the node.
+            self.network.handle_messages(ready.take_persisted_messages(),self.runtime.handle());
+        }
+    
+        // Call `RawNode::advance` interface to update position flags in the raft.
+        let mut light_rd = node.advance(ready);
+        // Update commit index.
+        if let Some(commit) = light_rd.commit_index() {
+            store.wl().mut_hard_state().set_commit(commit);
+        }
+        // Send out the messages.
+        self.network.handle_messages(light_rd.take_messages(),self.runtime.handle());
+        // Apply all committed entries.
+        handle_committed_entries(&mut node, light_rd.take_committed_entries());
+        // Advance the apply index.
+        node.advance_apply();
+        drop(node);
     }
-
-    let handle_committed_entries =
-        |rn: &mut RawNode<MemStorage>, committed_entries: Vec<Entry>| {
-            for entry in committed_entries {
-                if entry.data.is_empty() {
-                    // From new elected leaders.
-                    continue;
-                }
-                if let EntryType::EntryConfChange = entry.get_entry_type() {
-                    // For conf change messages, make them effective.
-                    let mut cc = ConfChange::default();
-                    cc.merge_from_bytes(&entry.data).unwrap();
-                    let cs = rn.apply_conf_change(&cc).unwrap();
-                    store.wl().set_conf_state(cs);
-                } else {
-                    // For normal proposals, extract the key-value pair and then
-                    // insert them into the kv engine.
-                    debug!(logger, "{:?}", entry);
-                }
-                if rn.raft.state == StateRole::Leader {
-                    // The leader should response to the clients, tell them if their proposals
-                    // succeeded or not.
-                    //let proposal = proposals.lock().unwrap().pop_front().unwrap();
-                    //proposal.propose_success.send(true).unwrap();
-                }
-            }
-        };
-    // Apply all committed entries.
-    handle_committed_entries(&mut node, ready.take_committed_entries());
-
-    // Persistent raft logs. It's necessary because in `RawNode::advance` we stabilize
-    // raft logs to the latest position.
-    if let Err(e) = store.wl().append(ready.entries()) {
-        error!(
-            logger,
-            "persist raft log fail: {:?}, need to retry or panic", e
-        );
-        return;
-    }
-
-    if let Some(hs) = ready.hs() {
-        // Raft HardState changed, and we need to persist it.
-        store.wl().set_hardstate(hs.clone());
-    }
-
-    if !ready.persisted_messages().is_empty() {
-        // Send out the persisted messages come from the node.
-        network.handle_messages(ready.take_persisted_messages()).await;
-    }
-
-    // Call `RawNode::advance` interface to update position flags in the raft.
-    let mut light_rd = node.advance(ready);
-    // Update commit index.
-    if let Some(commit) = light_rd.commit_index() {
-        store.wl().mut_hard_state().set_commit(commit);
-    }
-    // Send out the messages.
-    network.handle_messages(light_rd.take_messages()).await;
-    // Apply all committed entries.
-    handle_committed_entries(&mut node, light_rd.take_committed_entries());
-    // Advance the apply index.
-    node.advance_apply();
-    drop(node);
 }
 #[derive(StructOpt, Debug)]
 #[structopt(name = "basic")]
