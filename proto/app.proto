@@ -18,12 +18,13 @@ enum AppCmd {
 }
 message AppRequest{
     uint64 id=1;
-    AppCmd op=2;
+    AppCmd cmd=2;
     string key=3;
     string value=4;
 }
 message AppResponse{
     uint64 id=1;
     bool success=2;
-    string value=3;
+    string reason=3;
+    string value=4;
 }

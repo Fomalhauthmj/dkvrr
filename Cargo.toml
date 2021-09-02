@@ -2,7 +2,7 @@
 name = "dkvrr"
 version = "0.1.0"
 edition = "2018"
-
+authors = ["hemengjie"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
@@ -14,7 +14,7 @@ slog-async = "2.7.0"
 slog-term = "2.8.0"
 tokio = { version = "1.10.1", features = ["full"] }
 tokio-stream = "0.1"
-serde = { version = "1.0", features = ["derive"] }
+bytes = "1"
 
 tonic = "0.4"
 prost = "0.7"
