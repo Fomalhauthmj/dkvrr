@@ -9,6 +9,7 @@ authors = ["hemengjie"]
 raft = { version = "0.6.0", features = [
     "prost-codec",
 ], default-features = false }
+rocksdb = "0.17.0"
 slog = "2.7.0"
 slog-async = "2.7.0"
 slog-term = "2.8.0"

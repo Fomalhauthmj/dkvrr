@@ -1,6 +1,7 @@
 pub mod consensus;
 pub mod network;
 pub mod state_machine;
+pub mod storage;
 mod types;
 mod utils;
 pub mod app {
