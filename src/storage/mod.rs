@@ -51,6 +51,11 @@ impl RocksDBStorageCore {
         ConfState::u8_to_t(self.db.get(RAFT_STATE_CONF_STATE).unwrap().unwrap())
     }
 
+    fn set_raft_state(&self, rs: RaftState) {
+        self.set_hard_state(rs.hard_state);
+        self.set_conf_state(rs.conf_state);
+    }
+
     fn get_raft_state(&self) -> RaftState {
         RaftState {
             hard_state: self.get_hard_state(),
@@ -135,7 +140,7 @@ impl RocksDBStorageCore {
         if index == self.get_first_entry_index() {
             self.set_first_entry_index(index + 1);
         }
-        if self.get_first_entry_index()>self.get_last_entry_index(){
+        if self.get_first_entry_index() > self.get_last_entry_index() {
             self.set_entry_empty_flag(true);
         }
         let key = RAFT_ENTRY_PREFIX.to_string() + &index.to_string();
@@ -145,7 +150,7 @@ impl RocksDBStorageCore {
         if index == self.get_last_entry_index() {
             self.set_last_entry_index(index - 1);
         }
-        if self.get_first_entry_index()>self.get_last_entry_index(){
+        if self.get_first_entry_index() > self.get_last_entry_index() {
             self.set_entry_empty_flag(true);
         }
         let key = RAFT_ENTRY_PREFIX.to_string() + &index.to_string();
@@ -163,6 +168,12 @@ impl RocksDBStorageCore {
         }
     }
 
+    fn set_entries(&self,ents: &[Entry]){
+        for e in ents{
+            self.set_entry_at_back(e.clone());
+        }
+    }
+
     fn set_entry_empty_flag(&self, flag: bool) {
         self.db
             .put(RAFT_ENTRY_EMPTY_FLAG, flag.to_string())
@@ -171,13 +182,18 @@ impl RocksDBStorageCore {
 
     // equal to get_entry_empty_flag,just alias
     fn entries_is_empty(&self) -> bool {
-        match String::from_utf8(self.db.get(RAFT_ENTRY_EMPTY_FLAG).unwrap().unwrap())
-            .unwrap()
-            .as_str()
-        {
-            "true" => true,
-            "false" => false,
-            _ => false,
+        match self.db.get(RAFT_ENTRY_EMPTY_FLAG).unwrap() {
+            Some(data) => match String::from_utf8(data).unwrap().as_str() {
+                "true" => true,
+                "false" => false,
+                _ => panic!("unexpected value"),
+            },
+            None => {
+                self.db
+                    .put(RAFT_ENTRY_EMPTY_FLAG, true.to_string())
+                    .unwrap();
+                true
+            }
         }
     }
 }
@@ -186,7 +202,14 @@ impl RocksDBStorageCore {
         self.db.put(SNAPSHOT_METADATA, meta.t_to_u8()).unwrap();
     }
     fn get_snapshot_metadata(&self) -> SnapshotMetadata {
-        SnapshotMetadata::u8_to_t(self.db.get(SNAPSHOT_METADATA).unwrap().unwrap())
+        match self.db.get(SNAPSHOT_METADATA).unwrap() {
+            Some(data) => SnapshotMetadata::u8_to_t(data),
+            None => {
+                let default = SnapshotMetadata::default();
+                self.set_snapshot_metadata(default.clone());
+                default
+            }
+        }
     }
     fn set_snapshot_data(&self, data: Vec<u8>) {
         self.db.put(SNAPSHOT_DATA, data).unwrap();
@@ -207,10 +230,9 @@ impl RocksDBStorageCore {
             "commit_to {} but the entry does not exist",
             index
         );
-        let diff = index - self.get_first_entry_index();
         let mut hs = self.get_hard_state();
         hs.commit = index;
-        hs.term = self.get_entry(diff).term;
+        hs.term = self.get_entry(index).term;
         self.set_hard_state(hs);
         Ok(())
     }
@@ -258,10 +280,7 @@ impl RocksDBStorageCore {
         meta.index = hs.commit;
         meta.term = match meta.index.cmp(&snapshot_metadata.index) {
             cmp::Ordering::Equal => snapshot_metadata.term,
-            cmp::Ordering::Greater => {
-                let offset = self.get_first_entry_index();
-                self.get_entry(meta.index - offset).term
-            }
+            cmp::Ordering::Greater => self.get_entry(meta.index).term,
             cmp::Ordering::Less => {
                 panic!(
                     "commit {} < snapshot_metadata.index {}",
@@ -330,10 +349,9 @@ impl RocksDBStorageCore {
         }
 
         // Remove all entries overwritten by `ents`.
-        let diff = ents[0].index - self.first_index();
-        // need remove [diff,last_entry_index] -> diff..
+        // need remove [ents[0].index,last_entry_index]
         let last_entry_index = self.get_last_entry_index();
-        for i in (diff..=last_entry_index).rev() {
+        for i in (ents[0].index..=last_entry_index).rev() {
             self.delete_entry_from_back(i);
         }
         for e in ents {
@@ -431,5 +449,317 @@ impl Storage for RocksDBStorage {
             snap.mut_metadata().index = request_index;
         }
         Ok(snap)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::panic::{self, AssertUnwindSafe};
+
+    use protobuf::Message as PbMessage;
+
+    use raft::eraftpb::{ConfState, Entry, Snapshot};
+
+    use raft::{Error as RaftError, RaftState, StorageError};
+    use slog::{o, Logger};
+
+    use super::{RocksDBStorage, Storage};
+
+    fn temp_rocksdb() -> RocksDBStorage {
+        let mut temp_path = std::env::temp_dir();
+        temp_path.push("temp_RocksDB".to_string() + &rand::random::<u64>().to_string());
+        RocksDBStorage::new(
+            &temp_path,
+            Logger::root(slog::Discard, o!("from"=>"temp_RocksDB")),
+        )
+    }
+
+    fn new_entry(index: u64, term: u64) -> Entry {
+        let mut e = Entry::default();
+        e.term = term;
+        e.index = index;
+        e
+    }
+
+    fn size_of<T: PbMessage>(m: &T) -> u32 {
+        m.compute_size() as u32
+    }
+
+    fn new_snapshot(index: u64, term: u64, voters: Vec<u64>) -> Snapshot {
+        let mut s = Snapshot::default();
+        s.mut_metadata().index = index;
+        s.mut_metadata().term = term;
+        s.mut_metadata().mut_conf_state().voters = voters;
+        s
+    }
+
+    #[test]
+    fn test_storage_term() {
+        let ents = vec![new_entry(3, 3), new_entry(4, 4), new_entry(5, 5)];
+        let mut tests = vec![
+            (2, Err(RaftError::Store(StorageError::Compacted))),
+            (3, Ok(3)),
+            (4, Ok(4)),
+            (5, Ok(5)),
+            (6, Err(RaftError::Store(StorageError::Unavailable))),
+        ];
+
+        for (i, (idx, wterm)) in tests.drain(..).enumerate() {
+            let storage = temp_rocksdb();
+            storage.wl().set_entries(&ents);
+
+            let t = storage.term(idx);
+            if t != wterm {
+                panic!("#{}: expect res {:?}, got {:?}", i, wterm, t);
+            }
+        }
+    }
+
+    #[test]
+    fn test_storage_entries() {
+        let ents = vec![
+            new_entry(3, 3),
+            new_entry(4, 4),
+            new_entry(5, 5),
+            new_entry(6, 6),
+        ];
+        let max_u64 = u64::max_value();
+        let mut tests = vec![
+            (
+                2,
+                6,
+                max_u64,
+                Err(RaftError::Store(StorageError::Compacted)),
+            ),
+            (3, 4, max_u64, Ok(vec![new_entry(3, 3)])),
+            (4, 5, max_u64, Ok(vec![new_entry(4, 4)])),
+            (4, 6, max_u64, Ok(vec![new_entry(4, 4), new_entry(5, 5)])),
+            (
+                4,
+                7,
+                max_u64,
+                Ok(vec![new_entry(4, 4), new_entry(5, 5), new_entry(6, 6)]),
+            ),
+            // even if maxsize is zero, the first entry should be returned
+            (4, 7, 0, Ok(vec![new_entry(4, 4)])),
+            // limit to 2
+            (
+                4,
+                7,
+                u64::from(size_of(&ents[1]) + size_of(&ents[2])),
+                Ok(vec![new_entry(4, 4), new_entry(5, 5)]),
+            ),
+            (
+                4,
+                7,
+                u64::from(size_of(&ents[1]) + size_of(&ents[2]) + size_of(&ents[3]) / 2),
+                Ok(vec![new_entry(4, 4), new_entry(5, 5)]),
+            ),
+            (
+                4,
+                7,
+                u64::from(size_of(&ents[1]) + size_of(&ents[2]) + size_of(&ents[3]) - 1),
+                Ok(vec![new_entry(4, 4), new_entry(5, 5)]),
+            ),
+            // all
+            (
+                4,
+                7,
+                u64::from(size_of(&ents[1]) + size_of(&ents[2]) + size_of(&ents[3])),
+                Ok(vec![new_entry(4, 4), new_entry(5, 5), new_entry(6, 6)]),
+            ),
+        ];
+        for (i, (lo, hi, maxsize, wentries)) in tests.drain(..).enumerate() {
+            let storage = temp_rocksdb();
+            storage.wl().set_entries(&ents);
+            let e = storage.entries(lo, hi, maxsize);
+            if e != wentries {
+                panic!("#{}: expect entries {:?}, got {:?}", i, wentries, e);
+            }
+        }
+    }
+
+    #[test]
+    fn test_storage_last_index() {
+        let ents = vec![new_entry(3, 3), new_entry(4, 4), new_entry(5, 5)];
+        let storage = temp_rocksdb();
+        storage.wl().set_entries(&ents);
+
+        let wresult = Ok(5);
+        let result = storage.last_index();
+        if result != wresult {
+            panic!("want {:?}, got {:?}", wresult, result);
+        }
+
+        storage.wl().append(&[new_entry(6, 5)]).unwrap();
+        let wresult = Ok(6);
+        let result = storage.last_index();
+        if result != wresult {
+            panic!("want {:?}, got {:?}", wresult, result);
+        }
+    }
+
+    #[test]
+    fn test_storage_first_index() {
+        let ents = vec![new_entry(3, 3), new_entry(4, 4), new_entry(5, 5)];
+        let storage = temp_rocksdb();
+        storage.wl().set_entries(&ents);
+
+        assert_eq!(storage.first_index(), Ok(3));
+        storage.wl().compact(4).unwrap();
+        assert_eq!(storage.first_index(), Ok(4));
+    }
+
+    #[test]
+    fn test_storage_compact() {
+        let ents = vec![new_entry(3, 3), new_entry(4, 4), new_entry(5, 5)];
+        let mut tests = vec![(2, 3, 3, 3), (3, 3, 3, 3), (4, 4, 4, 2), (5, 5, 5, 1)];
+        for (i, (idx, windex, wterm, wlen)) in tests.drain(..).enumerate() {
+            let storage = temp_rocksdb();
+            storage.wl().set_entries(&ents);
+
+            storage.wl().compact(idx).unwrap();
+            let index = storage.first_index().unwrap();
+            if index != windex {
+                panic!("#{}: want {}, index {}", i, windex, index);
+            }
+            let term = if let Ok(v) = storage.entries(index, index + 1, 1) {
+                v.first().map_or(0, |e| e.term)
+            } else {
+                0
+            };
+            if term != wterm {
+                panic!("#{}: want {}, term {}", i, wterm, term);
+            }
+            let last = storage.last_index().unwrap();
+            let len = storage.entries(index, last + 1, 100).unwrap().len();
+            if len != wlen {
+                panic!("#{}: want {}, term {}", i, wlen, len);
+            }
+        }
+    }
+
+    #[test]
+    fn test_storage_create_snapshot() {
+        let ents = vec![new_entry(3, 3), new_entry(4, 4), new_entry(5, 5)];
+        let nodes = vec![1, 2, 3];
+        let mut conf_state = ConfState::default();
+        conf_state.voters = nodes.clone();
+        /*
+        let unavailable = Err(RaftError::Store(
+            StorageError::SnapshotTemporarilyUnavailable,
+        ));
+        */
+        let mut tests = vec![
+            (4, Ok(new_snapshot(4, 4, nodes.clone())), 0),
+            (5, Ok(new_snapshot(5, 5, nodes.clone())), 5),
+            (5, Ok(new_snapshot(6, 5, nodes)), 6),
+            //(5, unavailable, 6),
+        ];
+        for (i, (idx, wresult, windex)) in tests.drain(..).enumerate() {
+            let storage = temp_rocksdb();
+            storage.wl().set_entries(&ents);
+
+            let mut raft_state = RaftState::default();
+            raft_state.hard_state.commit = idx;
+            raft_state.hard_state.term = idx;
+            raft_state.conf_state = conf_state.clone();
+
+            storage.wl().set_raft_state(raft_state);
+
+            /*
+            if wresult.is_err() {
+                storage.wl().trigger_snap_unavailable();
+            }
+            */
+
+            let result = storage.snapshot(windex);
+            if result != wresult {
+                panic!("#{}: want {:?}, got {:?}", i, wresult, result);
+            }
+        }
+    }
+
+    #[test]
+    fn test_storage_append() {
+        let ents = vec![new_entry(3, 3), new_entry(4, 4), new_entry(5, 5)];
+        let mut tests = vec![
+            (
+                vec![new_entry(3, 3), new_entry(4, 4), new_entry(5, 5)],
+                Some(vec![new_entry(3, 3), new_entry(4, 4), new_entry(5, 5)]),
+            ),
+            (
+                vec![new_entry(3, 3), new_entry(4, 6), new_entry(5, 6)],
+                Some(vec![new_entry(3, 3), new_entry(4, 6), new_entry(5, 6)]),
+            ),
+            (
+                vec![
+                    new_entry(3, 3),
+                    new_entry(4, 4),
+                    new_entry(5, 5),
+                    new_entry(6, 5),
+                ],
+                Some(vec![
+                    new_entry(3, 3),
+                    new_entry(4, 4),
+                    new_entry(5, 5),
+                    new_entry(6, 5),
+                ]),
+            ),
+            // overwrite compacted raft logs is not allowed
+            (
+                vec![new_entry(2, 3), new_entry(3, 3), new_entry(4, 5)],
+                None,
+            ),
+            // truncate the existing entries and append
+            (
+                vec![new_entry(4, 5)],
+                Some(vec![new_entry(3, 3), new_entry(4, 5)]),
+            ),
+            // direct append
+            (
+                vec![new_entry(6, 6)],
+                Some(vec![
+                    new_entry(3, 3),
+                    new_entry(4, 4),
+                    new_entry(5, 5),
+                    new_entry(6, 6),
+                ]),
+            ),
+        ];
+        for (i, (entries, wentries)) in tests.drain(..).enumerate() {
+            let storage = temp_rocksdb();
+            storage.wl().set_entries(&ents);
+            let res = panic::catch_unwind(AssertUnwindSafe(|| storage.wl().append(&entries)));
+            if let Some(wentries) = wentries {
+                assert!(res.is_ok());
+                let e = &storage
+                    .entries(
+                        storage.first_index().unwrap(),
+                        storage.last_index().unwrap() + 1,
+                        u64::MAX,
+                    )
+                    .unwrap();
+                if *e != wentries {
+                    panic!("#{}: want {:?}, entries {:?}", i, wentries, e);
+                }
+            } else {
+                assert!(res.is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn test_storage_apply_snapshot() {
+        let nodes = vec![1, 2, 3];
+        let storage = temp_rocksdb();
+
+        // Apply snapshot successfully
+        let snap = new_snapshot(4, 4, nodes.clone());
+        assert!(storage.wl().apply_snapshot(snap).is_ok());
+
+        // Apply snapshot fails due to StorageError::SnapshotOutOfDate
+        let snap = new_snapshot(3, 3, nodes);
+        assert!(storage.wl().apply_snapshot(snap).is_err());
     }
 }
