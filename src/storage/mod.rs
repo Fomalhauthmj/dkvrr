@@ -29,6 +29,28 @@ impl RocksDBStorageCore {
         let db = DB::open_default(path).expect("RocksDB open error");
         RocksDBStorageCore { db, logger }
     }
+    fn init(&self) {
+        match self.db.get(RAFT_STATE_HARD_STATE).unwrap() {
+            None => self.set_hard_state(HardState::default()),
+            _ => {}
+        }
+        match self.db.get(RAFT_STATE_CONF_STATE).unwrap() {
+            None => self.set_conf_state(ConfState::default()),
+            _ => {}
+        }
+        match self.db.get(RAFT_ENTRY_EMPTY_FLAG).unwrap() {
+            None => self.set_entry_empty_flag(true),
+            _ => {}
+        }
+        match self.db.get(SNAPSHOT_METADATA).unwrap() {
+            None => self.set_snapshot_metadata(SnapshotMetadata::default()),
+            _ => {}
+        }
+        match self.db.get(SNAPSHOT_DATA).unwrap() {
+            None => self.set_snapshot_data(b"".to_vec()),
+            _ => {}
+        }
+    }
 }
 impl RocksDBStorageCore {
     /// Saves the current HardState.
@@ -168,8 +190,8 @@ impl RocksDBStorageCore {
         }
     }
 
-    fn set_entries(&self,ents: &[Entry]){
-        for e in ents{
+    fn set_entries(&self, ents: &[Entry]) {
+        for e in ents {
             self.set_entry_at_back(e.clone());
         }
     }
@@ -182,18 +204,13 @@ impl RocksDBStorageCore {
 
     // equal to get_entry_empty_flag,just alias
     fn entries_is_empty(&self) -> bool {
-        match self.db.get(RAFT_ENTRY_EMPTY_FLAG).unwrap() {
-            Some(data) => match String::from_utf8(data).unwrap().as_str() {
-                "true" => true,
-                "false" => false,
-                _ => panic!("unexpected value"),
-            },
-            None => {
-                self.db
-                    .put(RAFT_ENTRY_EMPTY_FLAG, true.to_string())
-                    .unwrap();
-                true
-            }
+        match String::from_utf8(self.db.get(RAFT_ENTRY_EMPTY_FLAG).unwrap().unwrap())
+            .unwrap()
+            .as_str()
+        {
+            "true" => true,
+            "false" => false,
+            _ => panic!("unexpected value"),
         }
     }
 }
@@ -202,14 +219,7 @@ impl RocksDBStorageCore {
         self.db.put(SNAPSHOT_METADATA, meta.t_to_u8()).unwrap();
     }
     fn get_snapshot_metadata(&self) -> SnapshotMetadata {
-        match self.db.get(SNAPSHOT_METADATA).unwrap() {
-            Some(data) => SnapshotMetadata::u8_to_t(data),
-            None => {
-                let default = SnapshotMetadata::default();
-                self.set_snapshot_metadata(default.clone());
-                default
-            }
-        }
+        SnapshotMetadata::u8_to_t(self.db.get(SNAPSHOT_METADATA).unwrap().unwrap())
     }
     fn set_snapshot_data(&self, data: Vec<u8>) {
         self.db.put(SNAPSHOT_DATA, data).unwrap();
@@ -247,10 +257,9 @@ impl RocksDBStorageCore {
         let index = meta.index;
 
         if self.first_index() > index {
-            return Box::new(Err(
-                "the snapshot index is less than the storage's first index",
-            ))
-            .unwrap();
+            return Err(Box::new(raft::Error::Store(
+                StorageError::SnapshotOutOfDate,
+            )));
         }
 
         self.set_snapshot_metadata(meta.clone());
@@ -365,9 +374,9 @@ pub struct RocksDBStorage {
 }
 impl RocksDBStorage {
     pub fn new(path: &Path, logger: Logger) -> Self {
-        RocksDBStorage {
-            core: Arc::new(RwLock::new(RocksDBStorageCore::new(path, logger))),
-        }
+        let core = Arc::new(RwLock::new(RocksDBStorageCore::new(path, logger)));
+        core.write().unwrap().init();
+        RocksDBStorage { core }
     }
 
     /// Opens up a read lock on the storage and returns a guard handle. Use this

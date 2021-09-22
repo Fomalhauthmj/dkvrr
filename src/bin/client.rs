@@ -14,7 +14,7 @@ async fn main() {
     loop {
         let mut buffer = String::new();
         io::stdin().read_line(&mut buffer).expect("read line error");
-        buffer.remove(buffer.len()-1);
+        buffer.remove(buffer.len() - 1);
         let args: Vec<&str> = buffer.split(' ').collect();
         println!("{:?}", args);
         let mut req = AppRequest::default();
