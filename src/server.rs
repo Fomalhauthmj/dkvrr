@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::{Arc, Mutex}};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 use slog::Logger;
 use tokio::sync::mpsc::channel;
@@ -21,8 +24,8 @@ impl DkvrrServer {
 
         let (consensus_to_state_machine_tx, consensus_to_state_machine_rx) = channel(1024);
         let (state_machine_to_consensus_tx, state_machine_to_consensus_rx) = channel(1024);
-        let kv=Arc::new(Mutex::new(HashMap::new()));
-        let kv_clone=kv.clone();
+        let kv = Arc::new(Mutex::new(HashMap::new()));
+        let kv_clone = kv.clone();
         let consensus_logger = self.logger.new(slog::o!("module"=>"consensus"));
         tokio::spawn(async move {
             let mut consensus = Consensus::new(

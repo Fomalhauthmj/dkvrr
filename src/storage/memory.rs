@@ -255,7 +255,10 @@ impl MemStorage {
     /// initialize the storage.
     ///
     /// You should use the same input to initialize all nodes.
-    pub fn new_with_conf_state<T>(kv_clone: Arc<Mutex<HashMap<String, String>>>,conf_state: T) -> MemStorage
+    pub fn new_with_conf_state<T>(
+        kv_clone: Arc<Mutex<HashMap<String, String>>>,
+        conf_state: T,
+    ) -> MemStorage
     where
         ConfState: From<T>,
     {
@@ -394,7 +397,7 @@ mod test {
 
     fn new_snapshot(index: u64, term: u64, voters: Vec<u64>) -> Snapshot {
         let mut s = Snapshot::default();
-        let kv:HashMap<String,String>=HashMap::new();
+        let kv: HashMap<String, String> = HashMap::new();
         let data = serde_json::to_vec(&kv).unwrap();
         s.set_data(data);
 

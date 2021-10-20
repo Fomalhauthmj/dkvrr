@@ -1,12 +1,17 @@
-use std::{collections::HashMap, sync::{Arc, Mutex}, time::Duration, vec};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::Duration,
+    vec,
+};
 
 use protobuf::Message as PbMessage;
 use raft::{prelude::*, StateRole};
-use slog::{Logger, error, info, warn};
+use slog::{error, info, warn, Logger};
 use tokio::{select, time::interval};
 use tokio_stream::{wrappers::IntervalStream, StreamExt};
 
-use crate::{Callback, MemStorage, TMessage, TReceiver, TSender, utils};
+use crate::{utils, Callback, MemStorage, TMessage, TReceiver, TSender};
 
 pub struct Consensus {
     logger: Logger,
@@ -20,7 +25,7 @@ pub struct Consensus {
 impl Consensus {
     pub fn new(
         id: u64,
-        kv_clone:Arc<Mutex<HashMap<String, String>>>,
+        kv_clone: Arc<Mutex<HashMap<String, String>>>,
         logger: Logger,
         to_network: TSender,
         to_state_machine: TSender,
@@ -35,11 +40,11 @@ impl Consensus {
                 s.mut_metadata().index = 1;
                 s.mut_metadata().term = 1;
                 s.mut_metadata().mut_conf_state().voters = vec![1];
-                let data={
-                    let kv=kv_clone.lock().unwrap();
+                let data = {
+                    let kv = kv_clone.lock().unwrap();
                     serde_json::to_vec(&*kv).unwrap()
                 };
-                s.set_data(data);       
+                s.set_data(data);
                 let storage = MemStorage::new(kv_clone);
                 storage.wl().apply_snapshot(s).unwrap();
                 RawNode::new(&cfg, storage, &logger).expect("create raw node error")
@@ -152,7 +157,7 @@ impl Consensus {
                 store.wl().set_conf_state(cs);
             } else {
                 let req = utils::convert_propose_data_to_req(entry.data);
-                info!(self.logger,"will apply {:?}",req);
+                info!(self.logger, "will apply {:?}", req);
                 self.to_state_machine
                     .send(TMessage::AppRequest(req))
                     .await
@@ -173,14 +178,14 @@ impl Consensus {
 
         let store = self.raw_node.raft.raft_log.store.clone();
 
-        // 1.   Check whether messages is empty or not. 
+        // 1.   Check whether messages is empty or not.
         //      If not, it means that the node will send messages to other nodes.
         if !ready.messages().is_empty() {
             self.handle_messages(ready.take_messages()).await;
         }
 
         // 2.   Check whether snapshot is empty or not.
-        //      If not empty, it means that the Raft node has received a Raft snapshot from the leader 
+        //      If not empty, it means that the Raft node has received a Raft snapshot from the leader
         //      and we must apply the snapshot.
         if *ready.snapshot() != Snapshot::default() {
             let s = ready.snapshot().clone();
@@ -194,7 +199,7 @@ impl Consensus {
         }
 
         // 3.   Check whether committed_entires is empty or not.
-        //      If not, it means that there are some newly committed log entries which you must apply to the state machine. 
+        //      If not, it means that there are some newly committed log entries which you must apply to the state machine.
         //      Of course, after applying, you need to update the applied index and resume apply later.
         self.handle_committed_entries(&store, ready.take_committed_entries())
             .await;
@@ -210,7 +215,7 @@ impl Consensus {
         }
 
         // 5.   Check whether hs is empty or not.
-        //      If not empty, it means that the HardState of the node has changed. 
+        //      If not empty, it means that the HardState of the node has changed.
         //      For example, the node may vote for a new leader, or the commit index has been increased.
         //      We must persist the changed HardState.
         if let Some(hs) = ready.hs() {
@@ -224,7 +229,7 @@ impl Consensus {
         }
 
         // 7.   Call advance to notify that the previous work is completed.
-        //      Get the return value LightReady and handle its messages and committed_entries like step 1 and step 3 does. 
+        //      Get the return value LightReady and handle its messages and committed_entries like step 1 and step 3 does.
         //      Then call advance_apply to advance the applied index inside.
         let mut light_rd = self.raw_node.advance(ready);
         // Update commit index.

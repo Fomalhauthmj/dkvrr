@@ -1,5 +1,5 @@
-#[allow(unused_must_use)]
-#[allow(dead_code)]
+#![allow(unused_must_use)]
+#![allow(dead_code)]
 use crate::utils::{TtoU8, U8toT};
 use raft::prelude::*;
 use raft::util::limit_size;
@@ -27,7 +27,7 @@ const SNAPSHOT_DATA: &str = "SnapshotData";
 Problem:
 There is no data in `Snapshot` returned by `MemStorage::snapshot` because applied data is not stored in `MemStorage`.
 So we need create a Storage that applied data stored in it.
-1. public set applied data function 
+1. public set applied data function
 2. require other moduel call this function
 3. get cloned statemachine handle then we can do something about its data.
 
@@ -37,9 +37,9 @@ pub struct RocksDBStorageCore {
     logger: Logger,
 }
 impl RocksDBStorageCore {
-    fn new(path: &Path,logger: Logger) -> Self {
+    fn new(path: &Path, logger: Logger) -> Self {
         let db = DB::open_default(path).expect("RocksDB open error");
-        RocksDBStorageCore { db,logger }
+        RocksDBStorageCore { db, logger }
     }
     fn init(&self) {
         match self.db.get(RAFT_STATE_HARD_STATE).unwrap() {

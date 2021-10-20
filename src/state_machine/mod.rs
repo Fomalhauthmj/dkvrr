@@ -47,7 +47,7 @@ impl StateMachine {
             id: req.id,
             ..Default::default()
         };
-        let mut inner=self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap();
         match req.cmd() {
             AppCmd::Set => {
                 inner.insert(req.key, req.value);
