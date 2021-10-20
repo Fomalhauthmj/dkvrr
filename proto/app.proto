@@ -12,9 +12,9 @@ message RaftMessageMockResponse{}
 message RaftConfChangeV2MockResponse{}
 
 enum AppCmd {
-    PUT = 0;
+    SET = 0;
     GET = 1;
-    DELETE = 2;
+    REMOVE = 2;
 }
 message AppRequest{
     uint64 id=1;

@@ -6,9 +6,7 @@ authors = ["hemengjie"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-raft = { version = "0.6.0", features = [
-    "prost-codec",
-], default-features = false }
+raft = { version = "0.6.0", features = ["prost-codec"], default-features = false }
 rocksdb = "0.17.0"
 slog = "2.7.0"
 slog-async = "2.7.0"
@@ -23,11 +21,9 @@ protobuf = "2"
 
 structopt = "0.3"
 rand = "0.8.4"
+clap = "2.33.3"
+serde = "1.0.130"
+serde_json = "1.0.68"
 [build-dependencies]
 tonic-build = "0.4"
 
-[[bin]]
-name = "server"
-
-[[bin]]
-name = "client"

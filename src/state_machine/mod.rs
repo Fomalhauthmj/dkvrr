@@ -1,66 +1,75 @@
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
-use slog::{error, trace, Logger};
+use slog::{error, warn, Logger};
 
 use crate::app::*;
-use crate::types::{TMessage, TReceiver, TRequest, TResponse, TSender};
+use crate::{TMessage, TReceiver, TSender};
 pub struct StateMachine {
     logger: Logger,
-    inner: HashMap<String, String>,
-    state_machine_to_consensus_tx: TSender,
+    inner: Arc<Mutex<HashMap<String, String>>>,
+    to_consensus: TSender,
+    from_consensus: TReceiver,
 }
 impl StateMachine {
-    pub fn new(logger: Logger, state_machine_to_consensus_tx: TSender) -> Self {
+    pub fn new(
+        logger: Logger,
+        inner: Arc<Mutex<HashMap<String, String>>>,
+        to_consensus: TSender,
+        from_consensus: TReceiver,
+    ) -> Self {
         StateMachine {
             logger,
-            inner: HashMap::new(),
-            state_machine_to_consensus_tx,
+            inner,
+            to_consensus,
+            from_consensus,
         }
     }
-    pub async fn start(&mut self, mut consensus_to_state_machine_rx: TReceiver) {
+    pub async fn run(&mut self) {
         loop {
-            match consensus_to_state_machine_rx.recv().await {
-                Some(TMessage::Request(TRequest::App(req))) => {
-                    let resp = self.apply(req);
-                    let resp = TMessage::Response(TResponse::App(resp));
-                    match self.state_machine_to_consensus_tx.send(resp).await {
-                        Ok(_) => trace!(self.logger, "send apply resp to consensus success"),
-                        Err(e) => error!(self.logger, "send apply resp to consensus error {}", e),
-                    }
+            match self.from_consensus.recv().await {
+                Some(TMessage::AppRequest(req)) => {
+                    let resp = TMessage::AppResponse(self.apply(req));
+                    self.to_consensus.send(resp).await.unwrap_or_else(|e| {
+                        error!(self.logger, "send app response to consensus {}", e);
+                    });
                 }
-                None => error!(self.logger, "consensus_to_state_machine_rx closed"),
-                _ => error!(self.logger, "unsupported request"),
+                None => {
+                    warn!(self.logger, "consensus to state machine closed");
+                    break;
+                }
+                _ => error!(self.logger, "unsupported tmsg from consensus"),
             }
         }
     }
     fn apply(&mut self, req: AppRequest) -> AppResponse {
-        let mut resp = AppResponse::default();
-        resp.id = req.id;
+        let mut resp = AppResponse {
+            id: req.id,
+            ..Default::default()
+        };
+        let mut inner=self.inner.lock().unwrap();
         match req.cmd() {
-            AppCmd::Put => {
-                match self.inner.insert(req.key, req.value) {
-                    Some(s) => resp.value = s,
-                    None => resp.value = "None".to_string(),
-                }
+            AppCmd::Set => {
+                inner.insert(req.key, req.value);
                 resp.success = true;
             }
-            AppCmd::Get => match self.inner.get(&req.key) {
+            AppCmd::Get => match inner.get(&req.key) {
                 Some(s) => {
-                    resp.value = s.to_string();
+                    resp.value = s.clone();
                     resp.success = true;
                 }
                 None => {
-                    resp.reason = "key not exist".to_string();
+                    resp.reason = "Key not exist".to_string();
                     resp.success = false;
                 }
             },
-            AppCmd::Delete => match self.inner.remove(&req.key) {
+            AppCmd::Remove => match inner.remove(&req.key) {
                 Some(s) => {
-                    resp.value = s.to_string();
+                    resp.value = s;
                     resp.success = true;
                 }
                 None => {
-                    resp.reason = "key not exist".to_string();
+                    resp.reason = "Key not exist".to_string();
                     resp.success = false;
                 }
             },

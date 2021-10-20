@@ -1,7 +1,7 @@
 use crate::app::app_message_server::AppMessage;
-use crate::types::{TMessage, TRequest, TResponse, TSender};
-use slog::{error, trace, Logger};
-use tokio::sync::oneshot::channel;
+use crate::{TMessage, TSender};
+use slog::{error, Logger};
+use tokio::sync::oneshot;
 
 #[derive(Debug)]
 pub struct AppMsgService {
@@ -19,9 +19,8 @@ impl AppMessage for AppMsgService {
         &self,
         request: tonic::Request<raft::eraftpb::Message>,
     ) -> Result<tonic::Response<crate::app::RaftMessageMockResponse>, tonic::Status> {
-        trace!(self.logger, "recv raft message {:?}", request);
         let msg = request.into_inner();
-        let tmsg = TMessage::Request(TRequest::RaftMessage(msg));
+        let tmsg = TMessage::RaftMessage(msg);
         match self.sender.send(tmsg).await {
             Ok(_) => {
                 return Ok(tonic::Response::new(
@@ -29,10 +28,10 @@ impl AppMessage for AppMsgService {
                 ));
             }
             Err(e) => {
-                error!(self.logger, "send tmsg to core {}", e);
+                error!(self.logger, "send raft message to consensus {}", e);
                 return Err(tonic::Status::new(
                     tonic::Code::Internal,
-                    "send tmsg to core error",
+                    "send raft message to consensus",
                 ));
             }
         };
@@ -42,9 +41,8 @@ impl AppMessage for AppMsgService {
         &self,
         request: tonic::Request<raft::eraftpb::ConfChangeV2>,
     ) -> Result<tonic::Response<crate::app::RaftConfChangeV2MockResponse>, tonic::Status> {
-        trace!(self.logger, "recv raft conf change v2 {:?}", request);
         let msg = request.into_inner();
-        let tmsg = TMessage::Request(TRequest::RaftConfChangeV2(msg));
+        let tmsg = TMessage::RaftConfChangeV2(msg);
         match self.sender.send(tmsg).await {
             Ok(_) => {
                 return Ok(tonic::Response::new(
@@ -52,10 +50,10 @@ impl AppMessage for AppMsgService {
                 ));
             }
             Err(e) => {
-                error!(self.logger, "send tmsg to core {}", e);
+                error!(self.logger, "send raft conf change v2 to consensus {}", e);
                 return Err(tonic::Status::new(
                     tonic::Code::Internal,
-                    "send tmsg to core error",
+                    "send raft conf change v2 to consensus",
                 ));
             }
         };
@@ -65,34 +63,33 @@ impl AppMessage for AppMsgService {
         &self,
         request: tonic::Request<crate::app::AppRequest>,
     ) -> Result<tonic::Response<crate::app::AppResponse>, tonic::Status> {
-        trace!(self.logger, "recv raft message {:?}", request);
         let msg = request.into_inner();
-        let (tx, rx) = channel::<TMessage>();
-        let tmsg = TMessage::RequestWithCallback(TRequest::App(msg), tx);
+        let (tx, rx) = oneshot::channel();
+        let tmsg = TMessage::AppRequestWithCallback(msg, tx);
         match self.sender.send(tmsg).await {
             Ok(_) => match rx.await {
                 Ok(tmsg) => {
-                    if let TMessage::Response(TResponse::App(resp)) = tmsg {
+                    if let TMessage::AppResponse(resp) = tmsg {
                         return Ok(tonic::Response::new(resp));
                     }
                     return Err(tonic::Status::new(
                         tonic::Code::Internal,
-                        "unmatch response from core error",
+                        "app response parse",
                     ));
                 }
                 Err(e) => {
-                    error!(self.logger, "recv callback tmsg from core {}", e);
+                    error!(self.logger, "recv app response from consensus {}", e);
                     return Err(tonic::Status::new(
                         tonic::Code::Internal,
-                        "recv callback tmsg from core error",
+                        "recv app response from consensus",
                     ));
                 }
             },
             Err(e) => {
-                error!(self.logger, "send tmsg to core {}", e);
+                error!(self.logger, "send app request to consensus {}", e);
                 return Err(tonic::Status::new(
                     tonic::Code::Internal,
-                    "send tmsg to core error",
+                    "send app request to consensus",
                 ));
             }
         };

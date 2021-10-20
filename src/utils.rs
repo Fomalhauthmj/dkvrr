@@ -1,7 +1,7 @@
 use crate::app::AppRequest;
 use bytes::Bytes;
 use prost::Message;
-use raft::eraftpb::{ConfState, Entry, HardState, SnapshotMetadata};
+use raft::prelude::*;
 
 pub trait TtoU8 {
     fn t_to_u8(&self) -> Vec<u8>;
@@ -79,7 +79,7 @@ mod tests {
     fn test_convert() {
         let mut req = AppRequest::default();
         req.id = 15;
-        req.set_cmd(app::AppCmd::Delete);
+        req.set_cmd(app::AppCmd::Remove);
         req.key = "test_convert".to_string();
         req.value = "convert_test".to_string();
         let data = convert_req_to_propose_data(req.clone());
